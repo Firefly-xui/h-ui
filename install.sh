@@ -50,11 +50,12 @@ echo_content() {
   esac
 }
 
-# 修复：正确的密码哈希计算函数
+# 新增：计算密码哈希的函数
 calculate_password_hash() {
-  local password="$1"
-  # 根据数据库中的哈希长度（56个字符）和格式判断，这应该是SHA-224哈希
-  echo -n "${password}" | sha224sum | cut -d' ' -f1
+  local username="$1"
+  local password="$2"
+  local combined="${username}.${password}"
+  echo -n "${combined}" | sha256sum | awk '{print $1}'
 }
 
 version_ge() {
@@ -236,7 +237,7 @@ get_user_config() {
   done
 }
 
-# 修复：正确的数据库凭据更新函数
+# 新增：直接操作数据库的函数
 update_database_credentials() {
   local db_path="${HUI_DATA_SYSTEMD}h-ui.db"
   local username="$1"
@@ -255,38 +256,35 @@ update_database_credentials() {
     return 1
   fi
   
-  # 计算密码哈希 - 使用正确的哈希算法
-  local pass_hash=$(calculate_password_hash "${password}")
-  # con_pass 格式：用户名.用户名
-  local con_pass="${username}.${username}"
+  # 计算密码哈希
+  local pass_hash=$(calculate_password_hash "${username}" "${password}")
+  local con_pass="${username}.${password}"  # 注意这里改为使用实际密码而不是用户名
   local current_time=$(date '+%Y-%m-%d %H:%M:%S')
+  local expire_time=253370736000000
   
-  echo_content yellow "正在更新数据库凭据..."
-  echo_content yellow "用户名: ${username}"
-  echo_content yellow "密码哈希: ${pass_hash}"
-  
-  # 更新数据库中的管理员账户（角色为admin的记录）
+  # 更新数据库中的管理员账户并锁定
   sqlite3 "${db_path}" <<EOF
+BEGIN TRANSACTION;
 UPDATE account SET 
   username = '${username}',
   pass = '${pass_hash}',
   con_pass = '${con_pass}',
-  update_time = '${current_time}'
-WHERE role = 'admin';
+  update_time = '${current_time}',
+  quota = -1,
+  download = 0,
+  upload = 0,
+  expire_time = ${expire_time},
+  role = 'admin',
+  deleted = 0
+WHERE id = 1;
+COMMIT;
 EOF
   
-  local update_result=$?
-  
-  # 验证更新是否成功
-  local updated_count=$(sqlite3 "${db_path}" "SELECT COUNT(*) FROM account WHERE role = 'admin' AND username = '${username}';")
-  
-  if [[ $update_result -eq 0 && $updated_count -gt 0 ]]; then
+  if [[ $? -eq 0 ]]; then
     echo_content green "数据库凭据更新成功"
     return 0
   else
     echo_content red "数据库凭据更新失败"
-    echo_content red "更新结果代码: $update_result"
-    echo_content red "更新记录数: $updated_count"
     return 1
   fi
 }
@@ -347,33 +345,26 @@ install_h_ui_systemd() {
 
   # 等待服务启动并初始化数据库
   echo_content yellow "等待H UI服务初始化..."
-  sleep 8
+  sleep 5
 
   # 检查服务状态
   if systemctl is-active --quiet h-ui; then
     echo_content green "H UI服务启动成功"
     
-    # 等待更长时间确保数据库完全初始化
-    echo_content yellow "等待数据库初始化完成..."
-    sleep 5
-    
     # 直接更新数据库中的用户凭据
     echo_content yellow "正在更新管理员凭据..."
     if update_database_credentials "${h_ui_username}" "${h_ui_password}"; then
       # 重启服务以应用更改
-      echo_content yellow "重启服务以应用更改..."
       systemctl restart h-ui
-      sleep 5
+      sleep 3
       
       if systemctl is-active --quiet h-ui; then
         echo_content green "凭据更新完成，服务重启成功"
       else
         echo_content yellow "警告: 服务重启后状态异常，但安装已完成"
-        systemctl status h-ui
       fi
     else
       echo_content yellow "警告: 凭据更新失败，请手动设置管理员账户"
-      echo_content yellow "您可以使用选项5重置管理员账户"
     fi
   else
     echo_content red "H UI服务启动失败"
@@ -456,7 +447,6 @@ ssh_local_port_forwarding() {
   echo_content skyBlue "---> SSH本地端口转发成功"
 }
 
-# 修复：重置管理员账户函数
 reset_sysadmin() {
   if systemctl list-units --type=service --all | grep -q 'h-ui.service'; then
     local db_path="${HUI_DATA_SYSTEMD}h-ui.db"
