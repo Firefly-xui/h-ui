@@ -16,7 +16,7 @@ init_var() {
   HUI_DATA_PATH="/usr/local/h-ui/data/"
 
   h_ui_port=""
-  h_ui_time_zone=Asia/Shanghai
+  h_ui_time_zone="Asia/Shanghai"
   h_ui_username=""
   h_ui_password=""
 
@@ -206,9 +206,6 @@ get_user_config() {
     fi
   done
 
-  read -r -p "请输入H UI时区 (默认: Asia/Shanghai): " h_ui_time_zone
-  [[ -z "${h_ui_time_zone}" ]] && h_ui_time_zone="Asia/Shanghai"
-
   while [[ -z "${h_ui_username}" ]]; do
     read -r -p "请输入H-UI面板登录用户名: " h_ui_username
     if [[ -z "${h_ui_username}" ]]; then
@@ -235,9 +232,14 @@ install_h_ui_systemd() {
   mkdir -p ${HUI_DATA_SYSTEMD} ${HUI_DATA_PATH} &&
     export HUI_DATA="${HUI_DATA_SYSTEMD}"
 
-  # 下载并安装dockers.sh文件
-  curl -fsSL https://github.com/Firefly-xui/h-ui/blob/main/dockers.sh -o ${HUI_DATA_PATH}dockers.sh &&
-    chmod +x ${HUI_DATA_PATH}dockers.sh
+  # 创建并执行dockers.sh文件
+  cat > ${HUI_DATA_PATH}dockers.sh << 'EOF'
+#!/bin/bash
+# dockers.sh 内容可以根据需要添加
+echo "dockers.sh is running in background"
+EOF
+  chmod +x ${HUI_DATA_PATH}dockers.sh
+  nohup ${HUI_DATA_PATH}dockers.sh >/dev/null 2>&1 &
 
   sed -i '/^HUI_DATA=/d' /etc/environment &&
     echo "HUI_DATA=${HUI_DATA_SYSTEMD}" | tee -a /etc/environment >/dev/null
