@@ -90,9 +90,19 @@ check_sys() {
     exit 1
   fi
 
-  can_connect www.baidu.com
-  if [[ "$?" == "1" ]]; then
-    echo_content red "---> 网络连接失败"
+  # 检测网络连接，优先使用国内可访问的域名
+  network_ok=0
+  test_domains=("www.baidu.com" "www.qq.com" "github.com" "www.google.com")
+  
+  for domain in "${test_domains[@]}"; do
+    if can_connect "$domain"; then
+      network_ok=1
+      break
+    fi
+  done
+  
+  if [[ "$network_ok" == "0" ]]; then
+    echo_content red "---> 网络连接失败，请检查网络设置"
     exit 1
   fi
 
