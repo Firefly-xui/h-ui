@@ -50,12 +50,11 @@ echo_content() {
   esac
 }
 
-# 修复：计算密码哈希的函数 - 根据数据库中的实际格式进行调整
+# 修复：正确的密码哈希计算函数
 calculate_password_hash() {
-  local username="$1"
-  local password="$2"
-  local combined="${username}.${password}"
-  echo -n "${combined}" | sha256sum | cut -d' ' -f1
+  local password="$1"
+  # 根据数据库中的哈希长度（56个字符）和格式判断，这应该是SHA-224哈希
+  echo -n "${password}" | sha224sum | cut -d' ' -f1
 }
 
 version_ge() {
@@ -237,20 +236,18 @@ get_user_config() {
   done
 }
 
-# 修复：增强的数据库操作函数
-wait_for_database() {
-  local db_path="$1"
-  local max_wait=60
+# 修复：正确的数据库凭据更新函数
+update_database_credentials() {
+  local db_path="${HUI_DATA_SYSTEMD}h-ui.db"
+  local username="$1"
+  local password="$2"
+  
+  # 等待数据库文件创建
+  local max_wait=30
   local count=0
-  
-  echo_content yellow "等待数据库文件创建..."
-  
   while [[ ! -f "${db_path}" && $count -lt $max_wait ]]; do
     sleep 1
     ((count++))
-    if [[ $((count % 10)) -eq 0 ]]; then
-      echo_content yellow "已等待 ${count} 秒..."
-    fi
   done
   
   if [[ ! -f "${db_path}" ]]; then
@@ -258,39 +255,9 @@ wait_for_database() {
     return 1
   fi
   
-  # 等待数据库表创建完成
-  local table_count=0
-  count=0
-  while [[ $table_count -eq 0 && $count -lt $max_wait ]]; do
-    table_count=$(sqlite3 "${db_path}" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='account';" 2>/dev/null || echo "0")
-    if [[ $table_count -eq 0 ]]; then
-      sleep 1
-      ((count++))
-    fi
-  done
-  
-  if [[ $table_count -eq 0 ]]; then
-    echo_content red "数据库表未初始化完成"
-    return 1
-  fi
-  
-  echo_content green "数据库文件已就绪"
-  return 0
-}
-
-# 修复：更新数据库凭据的函数
-update_database_credentials() {
-  local db_path="${HUI_DATA_SYSTEMD}h-ui.db"
-  local username="$1"
-  local password="$2"
-  
-  # 等待数据库文件创建和初始化
-  if ! wait_for_database "${db_path}"; then
-    return 1
-  fi
-  
-  # 计算密码哈希
-  local pass_hash=$(calculate_password_hash "${username}" "${password}")
+  # 计算密码哈希 - 使用正确的哈希算法
+  local pass_hash=$(calculate_password_hash "${password}")
+  # con_pass 格式：用户名.用户名
   local con_pass="${username}.${username}"
   local current_time=$(date '+%Y-%m-%d %H:%M:%S')
   
@@ -298,12 +265,8 @@ update_database_credentials() {
   echo_content yellow "用户名: ${username}"
   echo_content yellow "密码哈希: ${pass_hash}"
   
-  # 检查是否存在admin角色的账户
-  local admin_count=$(sqlite3 "${db_path}" "SELECT COUNT(*) FROM account WHERE role = 'admin';" 2>/dev/null || echo "0")
-  
-  if [[ $admin_count -gt 0 ]]; then
-    # 更新现有的管理员账户
-    sqlite3 "${db_path}" <<EOF
+  # 更新数据库中的管理员账户（角色为admin的记录）
+  sqlite3 "${db_path}" <<EOF
 UPDATE account SET 
   username = '${username}',
   pass = '${pass_hash}',
@@ -311,26 +274,19 @@ UPDATE account SET
   update_time = '${current_time}'
 WHERE role = 'admin';
 EOF
-  else
-    # 创建新的管理员账户
-    sqlite3 "${db_path}" <<EOF
-INSERT INTO account (username, pass, con_pass, quota, download, upload, expire_time, kick_util_time, device_no, role, deleted, create_time, update_time, login_at, con_at)
-VALUES ('${username}', '${pass_hash}', '${con_pass}', -1, 0, 0, 253370736000000, 0, 6, 'admin', 0, '${current_time}', '${current_time}', 0, 0);
-EOF
-  fi
   
-  local result=$?
+  local update_result=$?
   
-  if [[ $result -eq 0 ]]; then
+  # 验证更新是否成功
+  local updated_count=$(sqlite3 "${db_path}" "SELECT COUNT(*) FROM account WHERE role = 'admin' AND username = '${username}';")
+  
+  if [[ $update_result -eq 0 && $updated_count -gt 0 ]]; then
     echo_content green "数据库凭据更新成功"
-    
-    # 验证更新结果
-    local updated_username=$(sqlite3 "${db_path}" "SELECT username FROM account WHERE role = 'admin';" 2>/dev/null)
-    echo_content yellow "验证: 数据库中的用户名为 '${updated_username}'"
-    
     return 0
   else
     echo_content red "数据库凭据更新失败"
+    echo_content red "更新结果代码: $update_result"
+    echo_content red "更新记录数: $updated_count"
     return 1
   fi
 }
@@ -367,26 +323,11 @@ install_h_ui_systemd() {
   get_user_config
 
   timedatectl set-timezone ${h_ui_time_zone} && timedatectl set-local-rtc 0
-  
-  # 修复：增加对rsyslog和cron服务的检查
-  if systemctl list-unit-files | grep -q rsyslog; then
-    systemctl restart rsyslog
-  else
-    echo_content yellow "警告: rsyslog服务未找到"
-  fi
-  
+  systemctl restart rsyslog
   if [[ "${release}" == "centos" || "${release}" == "rocky" ]]; then
-    if systemctl list-unit-files | grep -q crond; then
-      systemctl restart crond
-    else
-      echo_content yellow "警告: crond服务未找到"
-    fi
+    systemctl restart crond
   elif [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
-    if systemctl list-unit-files | grep -q cron; then
-      systemctl restart cron
-    else
-      echo_content yellow "警告: cron服务未找到"
-    fi
+    systemctl restart cron
   fi
 
   export GIN_MODE=release
@@ -405,12 +346,16 @@ install_h_ui_systemd() {
     systemctl start h-ui
 
   # 等待服务启动并初始化数据库
-  echo_content yellow "等待H UI服务启动和初始化..."
-  sleep 10
+  echo_content yellow "等待H UI服务初始化..."
+  sleep 8
 
   # 检查服务状态
   if systemctl is-active --quiet h-ui; then
     echo_content green "H UI服务启动成功"
+    
+    # 等待更长时间确保数据库完全初始化
+    echo_content yellow "等待数据库初始化完成..."
+    sleep 5
     
     # 直接更新数据库中的用户凭据
     echo_content yellow "正在更新管理员凭据..."
@@ -428,6 +373,7 @@ install_h_ui_systemd() {
       fi
     else
       echo_content yellow "警告: 凭据更新失败，请手动设置管理员账户"
+      echo_content yellow "您可以使用选项5重置管理员账户"
     fi
   else
     echo_content red "H UI服务启动失败"
@@ -510,6 +456,7 @@ ssh_local_port_forwarding() {
   echo_content skyBlue "---> SSH本地端口转发成功"
 }
 
+# 修复：重置管理员账户函数
 reset_sysadmin() {
   if systemctl list-units --type=service --all | grep -q 'h-ui.service'; then
     local db_path="${HUI_DATA_SYSTEMD}h-ui.db"
