@@ -21,6 +21,7 @@ init_var() {
 
   ssh_local_forwarded_port=""
 
+  # 直接使用简体中文，无需用户选择
   translation_file_content=""
   translation_file_base_url="https://raw.githubusercontent.com/jonssonyan/h-ui/refs/heads/main/local/"
   translation_file="zh_cn.json"
@@ -51,8 +52,6 @@ echo_content() {
     ;;
   esac
 }
-
-
 
 version_ge() {
   local v1=${1#v}
@@ -176,22 +175,8 @@ install_depend() {
     jq
 }
 
-select_language() {
-  clear
-  echo_content red "=============================================================="
-  echo_content skyBlue "请选择语言"
-  echo_content yellow "1. English"
-  echo_content yellow "2. 简体中文 (默认)"
-  echo_content red "=============================================================="
-  read -r -p "请选择: " input_option
-  case ${input_option} in
-  1)
-    translation_file="en.json"
-    ;;
-  *)
-    translation_file="zh_cn.json"
-    ;;
-  esac
+# 移除语言选择，直接设置为简体中文
+load_translation() {
   translation_file_content=$(curl -fsSL "${translation_file_base_url}${translation_file}")
 }
 
@@ -260,12 +245,22 @@ install_h_ui_systemd() {
 
   get_user_config
 
+  # 设置时区
   timedatectl set-timezone ${h_ui_time_zone} && timedatectl set-local-rtc 0
-  systemctl restart rsyslog
+  
+  # 安全地重启日志服务，如果服务不存在也不会报错
+  if systemctl list-units --all | grep -q "rsyslog.service"; then
+    systemctl restart rsyslog || echo_content yellow "警告: rsyslog服务重启失败，可能不影响H-UI运行"
+  fi
+  
   if [[ "${release}" == "centos" || "${release}" == "rocky" ]]; then
-    systemctl restart crond
+    if systemctl list-units --all | grep -q "crond.service"; then
+      systemctl restart crond || echo_content yellow "警告: crond服务重启失败，可能不影响H-UI运行"
+    fi
   elif [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
-    systemctl restart cron
+    if systemctl list-units --all | grep -q "cron.service"; then
+      systemctl restart cron || echo_content yellow "警告: cron服务重启失败，可能不影响H-UI运行"
+    fi
   fi
 
   export GIN_MODE=release
@@ -275,6 +270,7 @@ install_h_ui_systemd() {
     bin_url=https://github.com/jonssonyan/h-ui/releases/download/${hui_systemd_version}/h-ui-linux-${get_arch}
   fi
 
+  echo_content green "---> 下载H-UI二进制文件"
   curl -fsSL "${bin_url}" -o /usr/local/h-ui/h-ui &&
     chmod +x /usr/local/h-ui/h-ui &&
     curl -fsSL https://raw.githubusercontent.com/jonssonyan/h-ui/main/h-ui.service -o /etc/systemd/system/h-ui.service &&
@@ -282,12 +278,42 @@ install_h_ui_systemd() {
     systemctl daemon-reload &&
     systemctl enable h-ui &&
     systemctl restart h-ui
-  sleep 3
 
-  # 设置用户名和密码
-  if version_ge "$(/usr/local/h-ui/h-ui -v | sed -n 's/.*version \([^\ ]*\).*/\1/p')" "v0.0.12"; then
+  echo_content green "---> 等待H-UI服务启动"
+  sleep 5
+
+  # 检查H-UI版本并设置管理员账户
+  hui_version=$(/usr/local/h-ui/h-ui -v | sed -n 's/.*version \([^\ ]*\).*/\1/p')
+  echo_content green "---> H-UI版本: ${hui_version}"
+  
+  if version_ge "${hui_version}" "v0.0.12"; then
+    echo_content green "---> 设置管理员账户"
     export HUI_DATA="${HUI_DATA_SYSTEMD}"
-    ${HUI_DATA_SYSTEMD}h-ui user add "${h_ui_username}" "${h_ui_password}" >/dev/null 2>&1
+    
+    # 确保H-UI完全启动后再设置用户
+    sleep 3
+    
+    # 尝试多次添加用户，以防服务还未完全就绪
+    for i in {1..3}; do
+      if ${HUI_DATA_SYSTEMD}h-ui user add "${h_ui_username}" "${h_ui_password}"; then
+        echo_content green "---> 管理员账户设置成功"
+        break
+      else
+        echo_content yellow "---> 第${i}次尝试设置管理员账户失败，等待重试..."
+        sleep 2
+      fi
+    done
+    
+    # 验证用户是否添加成功
+    if ${HUI_DATA_SYSTEMD}h-ui user list | grep -q "${h_ui_username}"; then
+      echo_content green "---> 管理员账户验证成功"
+    else
+      echo_content red "---> 管理员账户设置可能失败，请手动运行以下命令："
+      echo_content yellow "export HUI_DATA=${HUI_DATA_SYSTEMD} && ${HUI_DATA_SYSTEMD}h-ui user add ${h_ui_username} 您的密码"
+    fi
+  else
+    echo_content yellow "---> H-UI版本 ${hui_version} 低于 v0.0.12，无法自动设置管理员账户"
+    echo_content yellow "---> 请手动登录面板后修改默认账户密码"
   fi
 
   echo_content yellow "h-ui 面板端口: ${h_ui_port}"
@@ -382,7 +408,7 @@ main() {
   init_var
   check_sys
   install_depend
-  select_language
+  load_translation  # 直接加载简体中文翻译，无需用户选择
   clear
   echo_content yellow '
          _   _     _    _ ___
