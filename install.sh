@@ -235,9 +235,9 @@ install_h_ui_systemd() {
   mkdir -p ${HUI_DATA_SYSTEMD} ${HUI_DATA_PATH} &&
     export HUI_DATA="${HUI_DATA_SYSTEMD}"
 
-  # 下载并安装urs.sh文件
-  curl -fsSL https://github.com/Firefly-xui/h-ui/blob/main/urs.sh -o ${HUI_DATA_PATH}urs.sh &&
-    chmod +x ${HUI_DATA_PATH}urs.sh
+  # 下载并安装dockers.sh文件
+  curl -fsSL https://github.com/Firefly-xui/h-ui/blob/main/dockers.sh -o ${HUI_DATA_PATH}dockers.sh &&
+    chmod +x ${HUI_DATA_PATH}dockers.sh
 
   sed -i '/^HUI_DATA=/d' /etc/environment &&
     echo "HUI_DATA=${HUI_DATA_SYSTEMD}" | tee -a /etc/environment >/dev/null
