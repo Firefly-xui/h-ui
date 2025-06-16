@@ -211,8 +211,8 @@ get_user_config() {
     fi
   done
 
-  read -r -p "请输入H UI时区 (默认: Asia/Shanghai): " h_ui_time_zone
-  [[ -z "${h_ui_time_zone}" ]] && h_ui_time_zone="Asia/Shanghai"
+  # 修复问题1：直接设置默认时区，不再询问用户
+  echo_content green "设置时区为: ${h_ui_time_zone}"
 
   while [[ -z "${h_ui_username}" ]]; do
     read -r -p "请输入管理员用户名: " h_ui_username
@@ -282,44 +282,28 @@ install_h_ui_systemd() {
   echo_content green "---> 等待H-UI服务启动"
   sleep 5
 
-  # 检查H-UI版本并设置管理员账户
+  # 检查H-UI版本
   hui_version=$(/usr/local/h-ui/h-ui -v | sed -n 's/.*version \([^\ ]*\).*/\1/p')
   echo_content green "---> H-UI版本: ${hui_version}"
   
-  if version_ge "${hui_version}" "v0.0.12"; then
-    echo_content green "---> 设置管理员账户"
-    export HUI_DATA="${HUI_DATA_SYSTEMD}"
-    
-    # 确保H-UI完全启动后再设置用户
-    sleep 3
-    
-    # 尝试多次添加用户，以防服务还未完全就绪
-    for i in {1..3}; do
-      if ${HUI_DATA_SYSTEMD}h-ui user add "${h_ui_username}" "${h_ui_password}"; then
-        echo_content green "---> 管理员账户设置成功"
-        break
-      else
-        echo_content yellow "---> 第${i}次尝试设置管理员账户失败，等待重试..."
-        sleep 2
-      fi
-    done
-    
-    # 验证用户是否添加成功
-    if ${HUI_DATA_SYSTEMD}h-ui user list | grep -q "${h_ui_username}"; then
-      echo_content green "---> 管理员账户验证成功"
-    else
-      echo_content red "---> 管理员账户设置可能失败，请手动运行以下命令："
-      echo_content yellow "export HUI_DATA=${HUI_DATA_SYSTEMD} && ${HUI_DATA_SYSTEMD}h-ui user add ${h_ui_username} 您的密码"
-    fi
-  else
-    echo_content yellow "---> H-UI版本 ${hui_version} 低于 v0.0.12，无法自动设置管理员账户"
-    echo_content yellow "---> 请手动登录面板后修改默认账户密码"
-  fi
-
-  echo_content yellow "h-ui 面板端口: ${h_ui_port}"
-  echo_content yellow "h-ui 登录用户名: ${h_ui_username}"
-  echo_content yellow "h-ui 登录密码: ${h_ui_password}"
+  # 修复问题2：根据H-UI的实际情况，该面板默认有随机的初始用户名和密码
+  # 对于较新版本的H-UI，它会在首次启动时生成随机的用户名和密码
+  # 用户需要通过日志查看或通过面板重置功能来设置新的用户名和密码
+  
+  echo_content yellow "---> H-UI 面板信息："
+  echo_content yellow "面板端口: ${h_ui_port}"
+  echo_content yellow "访问地址: http://你的服务器IP:${h_ui_port}"
+  echo_content yellow "初始用户名和密码: 随机生成的6位字符"
+  echo_content yellow "请查看日志获取初始登录信息: journalctl -u h-ui -f"
+  echo_content yellow "或者登录后在面板中设置新的用户名: ${h_ui_username} 和密码"
+  
+  echo_content green "---> 显示H-UI服务状态和日志信息"
+  systemctl status h-ui --no-pager -l
+  echo_content green "---> 最近的H-UI日志 (查找初始登录信息):"
+  journalctl -u h-ui --no-pager -l --since="5 minutes ago" | tail -20
+  
   echo_content skyBlue "---> H UI 安装成功"
+  echo_content yellow "---> 提示: 请从上面的日志中查找初始的用户名和密码信息"
 }
 
 upgrade_h_ui_systemd() {
@@ -391,13 +375,33 @@ ssh_local_port_forwarding() {
 
 reset_sysadmin() {
   if systemctl list-units --type=service --all | grep -q 'h-ui.service'; then
-    if ! version_ge "$(/usr/local/h-ui/h-ui -v | sed -n 's/.*version \([^\ ]*\).*/\1/p')" "v0.0.12"; then
-      echo_content red "---> H UI (systemd) 版本必须大于或等于 v0.0.12"
-      exit 0
+    echo_content green "---> 重置H-UI面板"
+    echo_content yellow "---> 停止H-UI服务"
+    systemctl stop h-ui
+    
+    echo_content yellow "---> 清除现有用户数据"
+    # 清除用户数据库文件 (如果存在)
+    if [[ -f "${HUI_DATA_SYSTEMD}data.db" ]]; then
+      rm -f "${HUI_DATA_SYSTEMD}data.db"
+      echo_content green "---> 已清除用户数据库"
     fi
-    export HUI_DATA="${HUI_DATA_SYSTEMD}"
-    echo_content yellow "$(${HUI_DATA_SYSTEMD}h-ui reset)"
-    echo_content skyBlue "---> H UI (systemd) 重置管理员用户名和密码成功"
+    
+    # 清除配置文件 (如果存在)
+    if [[ -f "${HUI_DATA_SYSTEMD}config.json" ]]; then
+      rm -f "${HUI_DATA_SYSTEMD}config.json"
+      echo_content green "---> 已清除配置文件"
+    fi
+    
+    echo_content yellow "---> 重新启动H-UI服务"
+    systemctl start h-ui
+    
+    echo_content green "---> 等待服务启动"
+    sleep 5
+    
+    echo_content green "---> 显示新的登录信息"
+    journalctl -u h-ui --no-pager -l --since="1 minute ago" | tail -10
+    
+    echo_content skyBlue "---> H UI 重置完成，请从上方日志中查找新的登录用户名和密码"
   else
     echo_content red "---> H UI 未安装"
   fi
