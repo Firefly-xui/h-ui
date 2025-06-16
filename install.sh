@@ -52,13 +52,7 @@ echo_content() {
   esac
 }
 
-can_connect() {
-  if ping -c2 -i0.3 -W1 "$1" &>/dev/null; then
-    return 0
-  else
-    return 1
-  fi
-}
+
 
 version_ge() {
   local v1=${1#v}
@@ -87,22 +81,6 @@ version_ge() {
 check_sys() {
   if [[ $(id -u) != "0" ]]; then
     echo_content red "必须以root用户身份运行此脚本"
-    exit 1
-  fi
-
-  # 检测网络连接，优先使用国内可访问的域名
-  network_ok=0
-  test_domains=("www.baidu.com" "www.qq.com" "github.com" "www.google.com")
-  
-  for domain in "${test_domains[@]}"; do
-    if can_connect "$domain"; then
-      network_ok=1
-      break
-    fi
-  done
-  
-  if [[ "$network_ok" == "0" ]]; then
-    echo_content red "---> 网络连接失败，请检查网络设置"
     exit 1
   fi
 
