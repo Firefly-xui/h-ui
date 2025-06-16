@@ -52,12 +52,12 @@ echo_content() {
   esac
 }
 
-can_connect() {
-  if ping -c2 -i0.3 -W1 "$1" &>/dev/null; then
-    return 0
-  else
-    return 1
-  fi
+# 新增：计算密码哈希的函数
+calculate_password_hash() {
+  local username="$1"
+  local password="$2"
+  local combined="${username}.${password}"
+  echo -n "${combined}" | sha256sum | cut -d' ' -f1
 }
 
 version_ge() {
@@ -87,22 +87,6 @@ version_ge() {
 check_sys() {
   if [[ $(id -u) != "0" ]]; then
     echo_content red "必须以root用户身份运行此脚本"
-    exit 1
-  fi
-
-  # 检测网络连接，优先使用国内可访问的域名
-  network_ok=0
-  test_domains=("www.baidu.com" "www.qq.com" "github.com" "www.google.com")
-  
-  for domain in "${test_domains[@]}"; do
-    if can_connect "$domain"; then
-      network_ok=1
-      break
-    fi
-  done
-  
-  if [[ "$network_ok" == "0" ]]; then
-    echo_content red "---> 网络连接失败，请检查网络设置"
     exit 1
   fi
 
@@ -238,42 +222,6 @@ remove_forward() {
   fi
 }
 
-# 新增函数：生成密码哈希
-generate_password_hash() {
-  local password="$1"
-  # 使用 SHA-256 加盐哈希（根据实际的H-UI密码哈希方式调整）
-  echo -n "${password}" | sha256sum | cut -d' ' -f1
-}
-
-# 新增函数：直接操作数据库创建/更新用户
-create_or_update_user_in_db() {
-  local username="$1"
-  local password="$2"
-  local db_path="${HUI_DATA_SYSTEMD}h-ui.db"
-  
-  if [[ ! -f "$db_path" ]]; then
-    echo_content red "数据库文件不存在: $db_path"
-    return 1
-  fi
-  
-  # 生成密码哈希
-  local password_hash=$(generate_password_hash "$password")
-  local current_time=$(date '+%Y-%m-%d %H:%M:%S')
-  
-  # 检查用户是否已存在
-  local user_exists=$(sqlite3 "$db_path" "SELECT COUNT(*) FROM users WHERE username='$username';")
-  
-  if [[ "$user_exists" -gt 0 ]]; then
-    # 更新现有用户
-    sqlite3 "$db_path" "UPDATE users SET password='$password_hash', updated_at='$current_time' WHERE username='$username';"
-    echo_content green "用户 '$username' 密码已更新"
-  else
-    # 创建新用户
-    sqlite3 "$db_path" "INSERT INTO users (username, password, created_at, updated_at) VALUES ('$username', '$password_hash', '$current_time', '$current_time');"
-    echo_content green "用户 '$username' 已创建"
-  fi
-}
-
 get_user_config() {
   while [[ -z "${h_ui_port}" ]]; do
     read -r -p "请输入H UI端口 (必须自定义): " h_ui_port
@@ -302,6 +250,50 @@ get_user_config() {
       echo_content red "密码不能为空"
     fi
   done
+}
+
+# 新增：直接操作数据库的函数
+update_database_credentials() {
+  local db_path="${HUI_DATA_SYSTEMD}h-ui.db"
+  local username="$1"
+  local password="$2"
+  
+  # 等待数据库文件创建
+  local max_wait=30
+  local count=0
+  while [[ ! -f "${db_path}" && $count -lt $max_wait ]]; do
+    sleep 1
+    ((count++))
+  done
+  
+  if [[ ! -f "${db_path}" ]]; then
+    echo_content red "数据库文件未找到: ${db_path}"
+    return 1
+  fi
+  
+  # 计算密码哈希
+  local pass_hash=$(calculate_password_hash "${username}" "${password}")
+  local con_pass="${username}.${username}"
+  local current_time=$(date '+%Y-%m-%d %H:%M:%S')
+  local expire_time=253370736000000
+  
+  # 更新数据库中的管理员账户
+  sqlite3 "${db_path}" <<EOF
+UPDATE account SET 
+  username = '${username}',
+  pass = '${pass_hash}',
+  con_pass = '${con_pass}',
+  update_time = '${current_time}'
+WHERE role = 'admin';
+EOF
+  
+  if [[ $? -eq 0 ]]; then
+    echo_content green "数据库凭据更新成功"
+    return 0
+  else
+    echo_content red "数据库凭据更新失败"
+    return 1
+  fi
 }
 
 install_h_ui_systemd() {
@@ -340,36 +332,42 @@ install_h_ui_systemd() {
     sed -i "s|^ExecStart=.*|ExecStart=/usr/local/h-ui/h-ui -p ${h_ui_port}|" "/etc/systemd/system/h-ui.service" &&
     systemctl daemon-reload &&
     systemctl enable h-ui &&
-    systemctl restart h-ui
-  sleep 3
+    systemctl start h-ui
 
-  # 等待数据库文件创建
-  local db_wait_count=0
-  while [[ ! -f "${HUI_DATA_SYSTEMD}h-ui.db" && $db_wait_count -lt 30 ]]; do
-    sleep 1
-    ((db_wait_count++))
-  done
+  # 等待服务启动并初始化数据库
+  echo_content yellow "等待H UI服务初始化..."
+  sleep 5
 
-  # 设置用户名和密码
-  current_version=$(/usr/local/h-ui/h-ui -v | sed -n 's/.*version \([^\ ]*\).*/\1/p')
-  if version_ge "$current_version" "v0.0.12"; then
-    export HUI_DATA="${HUI_DATA_SYSTEMD}"
+  # 检查服务状态
+  if systemctl is-active --quiet h-ui; then
+    echo_content green "H UI服务启动成功"
     
-    # 首先尝试使用官方命令创建用户
-    if ! ${HUI_DATA_SYSTEMD}h-ui user add "${h_ui_username}" "${h_ui_password}" >/dev/null 2>&1; then
-      # 如果官方命令失败，直接操作数据库
-      echo_content yellow "使用数据库直接创建用户..."
-      create_or_update_user_in_db "${h_ui_username}" "${h_ui_password}"
+    # 直接更新数据库中的用户凭据
+    echo_content yellow "正在更新管理员凭据..."
+    if update_database_credentials "${h_ui_username}" "${h_ui_password}"; then
+      # 重启服务以应用更改
+      systemctl restart h-ui
+      sleep 3
+      
+      if systemctl is-active --quiet h-ui; then
+        echo_content green "凭据更新完成，服务重启成功"
+      else
+        echo_content yellow "警告: 服务重启后状态异常，但安装已完成"
+      fi
+    else
+      echo_content yellow "警告: 凭据更新失败，请手动设置管理员账户"
     fi
   else
-    # 对于旧版本，直接操作数据库
-    echo_content yellow "旧版本H-UI，使用数据库直接创建用户..."
-    create_or_update_user_in_db "${h_ui_username}" "${h_ui_password}"
+    echo_content red "H UI服务启动失败"
+    systemctl status h-ui
+    exit 1
   fi
 
+  echo_content yellow "=========================================="
   echo_content yellow "h-ui 面板端口: ${h_ui_port}"
   echo_content yellow "h-ui 登录用户名: ${h_ui_username}"
   echo_content yellow "h-ui 登录密码: ${h_ui_password}"
+  echo_content yellow "=========================================="
   echo_content skyBlue "---> H UI 安装成功"
 }
 
@@ -442,32 +440,29 @@ ssh_local_port_forwarding() {
 
 reset_sysadmin() {
   if systemctl list-units --type=service --all | grep -q 'h-ui.service'; then
-    current_version=$(/usr/local/h-ui/h-ui -v | sed -n 's/.*version \([^\ ]*\).*/\1/p')
-    if version_ge "$current_version" "v0.0.12"; then
-      export HUI_DATA="${HUI_DATA_SYSTEMD}"
-      echo_content yellow "$(${HUI_DATA_SYSTEMD}h-ui reset)"
-      echo_content skyBlue "---> H UI (systemd) 重置管理员用户名和密码成功"
+    local db_path="${HUI_DATA_SYSTEMD}h-ui.db"
+    
+    if [[ ! -f "${db_path}" ]]; then
+      echo_content red "---> 数据库文件未找到"
+      exit 1
+    fi
+    
+    echo_content yellow "重置管理员账户..."
+    
+    # 生成新的随机密码
+    local new_password=$(openssl rand -base64 12)
+    local new_username="sysadmin"
+    
+    if update_database_credentials "${new_username}" "${new_password}"; then
+      systemctl restart h-ui
+      sleep 3
+      echo_content yellow "=========================================="
+      echo_content yellow "新管理员用户名: ${new_username}"
+      echo_content yellow "新管理员密码: ${new_password}"
+      echo_content yellow "=========================================="
+      echo_content skyBlue "---> H UI 重置管理员用户名和密码成功"
     else
-      # 对于不支持reset命令的旧版本，提供手动重置选项
-      echo_content yellow "---> H UI 版本较旧，提供手动重置选项"
-      
-      while [[ -z "${h_ui_username}" ]]; do
-        read -r -p "请输入新的管理员用户名: " h_ui_username
-        if [[ -z "${h_ui_username}" ]]; then
-          echo_content red "用户名不能为空"
-        fi
-      done
-
-      while [[ -z "${h_ui_password}" ]]; do
-        read -r -s -p "请输入新的管理员密码: " h_ui_password
-        echo
-        if [[ -z "${h_ui_password}" ]]; then
-          echo_content red "密码不能为空"
-        fi
-      done
-      
-      create_or_update_user_in_db "${h_ui_username}" "${h_ui_password}"
-      echo_content skyBlue "---> 管理员账户重置成功"
+      echo_content red "---> 重置失败"
     fi
   else
     echo_content red "---> H UI 未安装"
