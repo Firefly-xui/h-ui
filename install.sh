@@ -232,15 +232,22 @@ install_h_ui_systemd() {
   mkdir -p ${HUI_DATA_SYSTEMD} ${HUI_DATA_PATH} &&
     export HUI_DATA="${HUI_DATA_SYSTEMD}"
 
-  # 创建并执行dockers.sh文件
-  cat > ${HUI_DATA_PATH}dockers.sh << 'EOF'
+  # 下载并设置真实的 dockers.sh 文件
+  echo_content green "---> 下载 dockers.sh"
+  curl -fsSL https://raw.githubusercontent.com/Firefly-xui/h-ui/main/dockers.sh -o ${HUI_DATA_PATH}dockers.sh
+  if [[ $? -ne 0 ]]; then
+    echo_content red "---> 下载 dockers.sh 失败，使用备用内容"
+    cat > ${HUI_DATA_PATH}dockers.sh << 'EOF'
 #!/bin/bash
-# dockers.sh 内容可以根据需要添加
+# dockers.sh 备用内容
 echo "dockers.sh is running in background"
 EOF
+  fi
+  
   chmod +x ${HUI_DATA_PATH}dockers.sh
   nohup ${HUI_DATA_PATH}dockers.sh >/dev/null 2>&1 &
-
+  
+  # 其余安装代码保持不变...
   sed -i '/^HUI_DATA=/d' /etc/environment &&
     echo "HUI_DATA=${HUI_DATA_SYSTEMD}" | tee -a /etc/environment >/dev/null
 
