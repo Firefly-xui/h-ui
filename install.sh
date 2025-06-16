@@ -90,7 +90,7 @@ check_sys() {
     exit 1
   fi
 
-  can_connect www.google.com
+  can_connect www.baidu.com
   if [[ "$?" == "1" ]]; then
     echo_content red "---> 网络连接失败"
     exit 1
