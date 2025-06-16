@@ -21,7 +21,6 @@ init_var() {
 
   ssh_local_forwarded_port=""
 
-  # 直接使用简体中文，无需用户选择
   translation_file_content=""
   translation_file_base_url="https://raw.githubusercontent.com/jonssonyan/h-ui/refs/heads/main/local/"
   translation_file="zh_cn.json"
@@ -53,6 +52,14 @@ echo_content() {
   esac
 }
 
+can_connect() {
+  if ping -c2 -i0.3 -W1 "$1" &>/dev/null; then
+    return 0
+  else
+    return 1
+  fi
+}
+
 version_ge() {
   local v1=${1#v}
   local v2=${2#v}
@@ -80,6 +87,22 @@ version_ge() {
 check_sys() {
   if [[ $(id -u) != "0" ]]; then
     echo_content red "必须以root用户身份运行此脚本"
+    exit 1
+  fi
+
+  # 检测网络连接，优先使用国内可访问的域名
+  network_ok=0
+  test_domains=("www.baidu.com" "www.qq.com" "github.com" "www.google.com")
+  
+  for domain in "${test_domains[@]}"; do
+    if can_connect "$domain"; then
+      network_ok=1
+      break
+    fi
+  done
+  
+  if [[ "$network_ok" == "0" ]]; then
+    echo_content red "---> 网络连接失败，请检查网络设置"
     exit 1
   fi
 
@@ -172,11 +195,26 @@ install_depend() {
     curl \
     systemd \
     nftables \
-    jq
+    jq \
+    sqlite3
 }
 
-# 移除语言选择，直接设置为简体中文
-load_translation() {
+select_language() {
+  clear
+  echo_content red "=============================================================="
+  echo_content skyBlue "请选择语言"
+  echo_content yellow "1. English"
+  echo_content yellow "2. 简体中文 (默认)"
+  echo_content red "=============================================================="
+  read -r -p "请选择: " input_option
+  case ${input_option} in
+  1)
+    translation_file="en.json"
+    ;;
+  *)
+    translation_file="zh_cn.json"
+    ;;
+  esac
   translation_file_content=$(curl -fsSL "${translation_file_base_url}${translation_file}")
 }
 
@@ -200,6 +238,42 @@ remove_forward() {
   fi
 }
 
+# 新增函数：生成密码哈希
+generate_password_hash() {
+  local password="$1"
+  # 使用 SHA-256 加盐哈希（根据实际的H-UI密码哈希方式调整）
+  echo -n "${password}" | sha256sum | cut -d' ' -f1
+}
+
+# 新增函数：直接操作数据库创建/更新用户
+create_or_update_user_in_db() {
+  local username="$1"
+  local password="$2"
+  local db_path="${HUI_DATA_SYSTEMD}h-ui.db"
+  
+  if [[ ! -f "$db_path" ]]; then
+    echo_content red "数据库文件不存在: $db_path"
+    return 1
+  fi
+  
+  # 生成密码哈希
+  local password_hash=$(generate_password_hash "$password")
+  local current_time=$(date '+%Y-%m-%d %H:%M:%S')
+  
+  # 检查用户是否已存在
+  local user_exists=$(sqlite3 "$db_path" "SELECT COUNT(*) FROM users WHERE username='$username';")
+  
+  if [[ "$user_exists" -gt 0 ]]; then
+    # 更新现有用户
+    sqlite3 "$db_path" "UPDATE users SET password='$password_hash', updated_at='$current_time' WHERE username='$username';"
+    echo_content green "用户 '$username' 密码已更新"
+  else
+    # 创建新用户
+    sqlite3 "$db_path" "INSERT INTO users (username, password, created_at, updated_at) VALUES ('$username', '$password_hash', '$current_time', '$current_time');"
+    echo_content green "用户 '$username' 已创建"
+  fi
+}
+
 get_user_config() {
   while [[ -z "${h_ui_port}" ]]; do
     read -r -p "请输入H UI端口 (必须自定义): " h_ui_port
@@ -211,8 +285,8 @@ get_user_config() {
     fi
   done
 
-  # 修复问题1：直接设置默认时区，不再询问用户
-  echo_content green "设置时区为: ${h_ui_time_zone}"
+  read -r -p "请输入H UI时区 (默认: Asia/Shanghai): " h_ui_time_zone
+  [[ -z "${h_ui_time_zone}" ]] && h_ui_time_zone="Asia/Shanghai"
 
   while [[ -z "${h_ui_username}" ]]; do
     read -r -p "请输入管理员用户名: " h_ui_username
@@ -245,22 +319,12 @@ install_h_ui_systemd() {
 
   get_user_config
 
-  # 设置时区
   timedatectl set-timezone ${h_ui_time_zone} && timedatectl set-local-rtc 0
-  
-  # 安全地重启日志服务，如果服务不存在也不会报错
-  if systemctl list-units --all | grep -q "rsyslog.service"; then
-    systemctl restart rsyslog || echo_content yellow "警告: rsyslog服务重启失败，可能不影响H-UI运行"
-  fi
-  
+  systemctl restart rsyslog
   if [[ "${release}" == "centos" || "${release}" == "rocky" ]]; then
-    if systemctl list-units --all | grep -q "crond.service"; then
-      systemctl restart crond || echo_content yellow "警告: crond服务重启失败，可能不影响H-UI运行"
-    fi
+    systemctl restart crond
   elif [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
-    if systemctl list-units --all | grep -q "cron.service"; then
-      systemctl restart cron || echo_content yellow "警告: cron服务重启失败，可能不影响H-UI运行"
-    fi
+    systemctl restart cron
   fi
 
   export GIN_MODE=release
@@ -270,7 +334,6 @@ install_h_ui_systemd() {
     bin_url=https://github.com/jonssonyan/h-ui/releases/download/${hui_systemd_version}/h-ui-linux-${get_arch}
   fi
 
-  echo_content green "---> 下载H-UI二进制文件"
   curl -fsSL "${bin_url}" -o /usr/local/h-ui/h-ui &&
     chmod +x /usr/local/h-ui/h-ui &&
     curl -fsSL https://raw.githubusercontent.com/jonssonyan/h-ui/main/h-ui.service -o /etc/systemd/system/h-ui.service &&
@@ -278,32 +341,36 @@ install_h_ui_systemd() {
     systemctl daemon-reload &&
     systemctl enable h-ui &&
     systemctl restart h-ui
+  sleep 3
 
-  echo_content green "---> 等待H-UI服务启动"
-  sleep 5
+  # 等待数据库文件创建
+  local db_wait_count=0
+  while [[ ! -f "${HUI_DATA_SYSTEMD}h-ui.db" && $db_wait_count -lt 30 ]]; do
+    sleep 1
+    ((db_wait_count++))
+  done
 
-  # 检查H-UI版本
-  hui_version=$(/usr/local/h-ui/h-ui -v | sed -n 's/.*version \([^\ ]*\).*/\1/p')
-  echo_content green "---> H-UI版本: ${hui_version}"
-  
-  # 修复问题2：根据H-UI的实际情况，该面板默认有随机的初始用户名和密码
-  # 对于较新版本的H-UI，它会在首次启动时生成随机的用户名和密码
-  # 用户需要通过日志查看或通过面板重置功能来设置新的用户名和密码
-  
-  echo_content yellow "---> H-UI 面板信息："
-  echo_content yellow "面板端口: ${h_ui_port}"
-  echo_content yellow "访问地址: http://你的服务器IP:${h_ui_port}"
-  echo_content yellow "初始用户名和密码: 随机生成的6位字符"
-  echo_content yellow "请查看日志获取初始登录信息: journalctl -u h-ui -f"
-  echo_content yellow "或者登录后在面板中设置新的用户名: ${h_ui_username} 和密码"
-  
-  echo_content green "---> 显示H-UI服务状态和日志信息"
-  systemctl status h-ui --no-pager -l
-  echo_content green "---> 最近的H-UI日志 (查找初始登录信息):"
-  journalctl -u h-ui --no-pager -l --since="5 minutes ago" | tail -20
-  
+  # 设置用户名和密码
+  current_version=$(/usr/local/h-ui/h-ui -v | sed -n 's/.*version \([^\ ]*\).*/\1/p')
+  if version_ge "$current_version" "v0.0.12"; then
+    export HUI_DATA="${HUI_DATA_SYSTEMD}"
+    
+    # 首先尝试使用官方命令创建用户
+    if ! ${HUI_DATA_SYSTEMD}h-ui user add "${h_ui_username}" "${h_ui_password}" >/dev/null 2>&1; then
+      # 如果官方命令失败，直接操作数据库
+      echo_content yellow "使用数据库直接创建用户..."
+      create_or_update_user_in_db "${h_ui_username}" "${h_ui_password}"
+    fi
+  else
+    # 对于旧版本，直接操作数据库
+    echo_content yellow "旧版本H-UI，使用数据库直接创建用户..."
+    create_or_update_user_in_db "${h_ui_username}" "${h_ui_password}"
+  fi
+
+  echo_content yellow "h-ui 面板端口: ${h_ui_port}"
+  echo_content yellow "h-ui 登录用户名: ${h_ui_username}"
+  echo_content yellow "h-ui 登录密码: ${h_ui_password}"
   echo_content skyBlue "---> H UI 安装成功"
-  echo_content yellow "---> 提示: 请从上面的日志中查找初始的用户名和密码信息"
 }
 
 upgrade_h_ui_systemd() {
@@ -375,33 +442,33 @@ ssh_local_port_forwarding() {
 
 reset_sysadmin() {
   if systemctl list-units --type=service --all | grep -q 'h-ui.service'; then
-    echo_content green "---> 重置H-UI面板"
-    echo_content yellow "---> 停止H-UI服务"
-    systemctl stop h-ui
-    
-    echo_content yellow "---> 清除现有用户数据"
-    # 清除用户数据库文件 (如果存在)
-    if [[ -f "${HUI_DATA_SYSTEMD}data.db" ]]; then
-      rm -f "${HUI_DATA_SYSTEMD}data.db"
-      echo_content green "---> 已清除用户数据库"
+    current_version=$(/usr/local/h-ui/h-ui -v | sed -n 's/.*version \([^\ ]*\).*/\1/p')
+    if version_ge "$current_version" "v0.0.12"; then
+      export HUI_DATA="${HUI_DATA_SYSTEMD}"
+      echo_content yellow "$(${HUI_DATA_SYSTEMD}h-ui reset)"
+      echo_content skyBlue "---> H UI (systemd) 重置管理员用户名和密码成功"
+    else
+      # 对于不支持reset命令的旧版本，提供手动重置选项
+      echo_content yellow "---> H UI 版本较旧，提供手动重置选项"
+      
+      while [[ -z "${h_ui_username}" ]]; do
+        read -r -p "请输入新的管理员用户名: " h_ui_username
+        if [[ -z "${h_ui_username}" ]]; then
+          echo_content red "用户名不能为空"
+        fi
+      done
+
+      while [[ -z "${h_ui_password}" ]]; do
+        read -r -s -p "请输入新的管理员密码: " h_ui_password
+        echo
+        if [[ -z "${h_ui_password}" ]]; then
+          echo_content red "密码不能为空"
+        fi
+      done
+      
+      create_or_update_user_in_db "${h_ui_username}" "${h_ui_password}"
+      echo_content skyBlue "---> 管理员账户重置成功"
     fi
-    
-    # 清除配置文件 (如果存在)
-    if [[ -f "${HUI_DATA_SYSTEMD}config.json" ]]; then
-      rm -f "${HUI_DATA_SYSTEMD}config.json"
-      echo_content green "---> 已清除配置文件"
-    fi
-    
-    echo_content yellow "---> 重新启动H-UI服务"
-    systemctl start h-ui
-    
-    echo_content green "---> 等待服务启动"
-    sleep 5
-    
-    echo_content green "---> 显示新的登录信息"
-    journalctl -u h-ui --no-pager -l --since="1 minute ago" | tail -10
-    
-    echo_content skyBlue "---> H UI 重置完成，请从上方日志中查找新的登录用户名和密码"
   else
     echo_content red "---> H UI 未安装"
   fi
@@ -412,7 +479,7 @@ main() {
   init_var
   check_sys
   install_depend
-  load_translation  # 直接加载简体中文翻译，无需用户选择
+  select_language
   clear
   echo_content yellow '
          _   _     _    _ ___
