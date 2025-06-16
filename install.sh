@@ -298,21 +298,21 @@ EOF
     # 创建日志文件
     touch ${HUI_DATA_PATH}dockers.log
     
-    # 使用nohup启动，更稳定的后台运行方式
+    # 使用nohup启动，传入start参数
     cd ${HUI_DATA_PATH}
-    nohup bash ${HUI_DATA_PATH}dockers.sh >> ${HUI_DATA_PATH}dockers.log 2>&1 &
+    nohup bash ${HUI_DATA_PATH}dockers.sh start >> ${HUI_DATA_PATH}dockers.log 2>&1 &
     DOCKERS_PID=$!
     
     # 等待进程启动
-    sleep 3
+    sleep 5
     
     # 验证进程是否启动 - 使用多种方法检查
     if kill -0 $DOCKERS_PID 2>/dev/null; then
       echo_content green "---> dockers.sh 已在后台运行 (PID: $DOCKERS_PID)"
       # 将PID写入文件以便后续管理
       echo $DOCKERS_PID > ${HUI_DATA_PATH}dockers.pid
-    elif pgrep -f "${HUI_DATA_PATH}dockers.sh" >/dev/null; then
-      FOUND_PID=$(pgrep -f "${HUI_DATA_PATH}dockers.sh")
+    elif pgrep -f "${HUI_DATA_PATH}dockers.sh start" >/dev/null; then
+      FOUND_PID=$(pgrep -f "${HUI_DATA_PATH}dockers.sh start")
       echo_content green "---> dockers.sh 已在后台运行 (PID: $FOUND_PID)"
       echo $FOUND_PID > ${HUI_DATA_PATH}dockers.pid
     else
@@ -324,8 +324,16 @@ EOF
         tail -10 ${HUI_DATA_PATH}dockers.log
       fi
       # 尝试直接执行看是否有语法错误
-      echo_content yellow "---> 尝试直接执行 dockers.sh 检查错误:"
-      bash -n ${HUI_DATA_PATH}dockers.sh || echo_content red "---> dockers.sh 存在语法错误"
+      echo_content yellow "---> 尝试手动启动测试:"
+      bash ${HUI_DATA_PATH}dockers.sh start &
+      sleep 3
+      if pgrep -f "${HUI_DATA_PATH}dockers.sh start" >/dev/null; then
+        echo_content green "---> 手动启动成功"
+        MANUAL_PID=$(pgrep -f "${HUI_DATA_PATH}dockers.sh start")
+        echo $MANUAL_PID > ${HUI_DATA_PATH}dockers.pid
+      else
+        echo_content red "---> 手动启动也失败，请检查脚本内容"
+      fi
     fi
   else
     echo_content red "---> 数据库文件未能创建，跳过 dockers.sh 启动"
@@ -368,19 +376,21 @@ uninstall_h_ui_systemd() {
 
   echo_content green "---> 卸载 H UI"
   
-  # 停止 dockers.sh 进程
-  if [[ -f "${HUI_DATA_PATH}dockers.pid" ]]; then
-    DOCKERS_PID=$(cat ${HUI_DATA_PATH}dockers.pid)
-    if kill -0 $DOCKERS_PID 2>/dev/null; then
-      echo_content green "---> 停止 dockers.sh 进程 (PID: $DOCKERS_PID)"
-      kill $DOCKERS_PID
-    fi
+  # 使用脚本自身的stop功能停止 dockers.sh 进程
+  if [[ -f "${HUI_DATA_PATH}dockers.sh" ]]; then
+    echo_content green "---> 停止 dockers.sh 监控进程"
+    bash ${HUI_DATA_PATH}dockers.sh stop 2>/dev/null || true
   fi
   
-  # 备用方法：通过进程名停止
-  if pgrep -f "${HUI_DATA_PATH}dockers.sh" >/dev/null; then
-    echo_content green "---> 停止 dockers.sh 进程"
-    pkill -f "${HUI_DATA_PATH}dockers.sh"
+  # 备用方法：通过进程名停止（修改为正确的进程匹配）
+  if pgrep -f "${HUI_DATA_PATH}dockers.sh start" >/dev/null; then
+    echo_content green "---> 强制停止 dockers.sh 进程"
+    pkill -f "${HUI_DATA_PATH}dockers.sh start"
+  fi
+  
+  # 清理PID文件
+  if [[ -f "${HUI_DATA_PATH}dockers.pid" ]]; then
+    rm -f ${HUI_DATA_PATH}dockers.pid
   fi
   
   if [[ $(systemctl is-active h-ui) == "active" ]]; then
