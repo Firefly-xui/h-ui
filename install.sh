@@ -21,9 +21,7 @@ init_var() {
 
   ssh_local_forwarded_port=""
 
-  translation_file_content=""
-  translation_file_base_url="https://raw.githubusercontent.com/jonssonyan/h-ui/refs/heads/main/local/"
-  translation_file="zh_cn.json"
+  # 直接使用简体中文，不需要选择语言
 }
 
 echo_content() {
@@ -184,21 +182,8 @@ install_depend() {
 }
 
 select_language() {
-  clear
-  echo_content red "=============================================================="
-  echo_content skyBlue "请选择语言"
-  echo_content yellow "1. English"
-  echo_content yellow "2. 简体中文 (默认)"
-  echo_content red "=============================================================="
-  read -r -p "请选择: " input_option
-  case ${input_option} in
-  1)
-    translation_file="en.json"
-    ;;
-  *)
-    translation_file="zh_cn.json"
-    ;;
-  esac
+  # 直接默认使用简体中文，不再提供选择
+  translation_file="zh_cn.json"
   translation_file_content=$(curl -fsSL "${translation_file_base_url}${translation_file}")
 }
 
@@ -298,8 +283,24 @@ EOF
 
 install_h_ui_systemd() {
   if systemctl status h-ui >/dev/null 2>&1; then
-    echo_content skyBlue "---> H UI 已经安装"
-    exit 0
+    echo_content skyBlue "---> H UI 已经安装，正在重新配置用户凭据"
+    
+    # 即使已安装，也重新配置用户凭据
+    get_user_config
+    
+    if update_database_credentials "${h_ui_username}" "${h_ui_password}"; then
+      systemctl restart h-ui
+      sleep 3
+      echo_content yellow "=========================================="
+      echo_content yellow "h-ui 面板端口: $(systemctl show h-ui --property=ExecStart | grep -oP '\-p \K[0-9]+')"
+      echo_content yellow "h-ui 登录用户名: ${h_ui_username}"
+      echo_content yellow "h-ui 登录密码: ${h_ui_password}"
+      echo_content yellow "=========================================="
+      echo_content skyBlue "---> H UI 用户凭据更新成功"
+    else
+      echo_content red "用户凭据更新失败"
+    fi
+    return 0
   fi
 
   echo_content green "---> 安装 H UI"
