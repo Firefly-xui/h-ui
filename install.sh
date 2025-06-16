@@ -50,220 +50,48 @@ echo_content() {
   esac
 }
 
-# 新增：计算密码哈希的函数
-calculate_password_hash() {
-  local username="$1"
-  local password="$2"
-  local combined="${username}.${password}"
-  echo -n "${combined}" | sha256sum | awk '{print $1}'
-}
-
-version_ge() {
-  local v1=${1#v}
-  local v2=${2#v}
-
-  if [[ -z "$v1" || "$v1" == "latest" ]]; then
+# 新增：等待数据库文件创建的函数
+wait_for_database() {
+  local db_path="$1"
+  local max_wait=60  # 最大等待60秒
+  local count=0
+  
+  echo_content yellow "等待数据库初始化..."
+  
+  while [[ ! -f "${db_path}" && $count -lt $max_wait ]]; do
+    sleep 1
+    ((count++))
+    echo -n "."
+  done
+  echo
+  
+  if [[ -f "${db_path}" ]]; then
     return 0
-  fi
-
-  IFS='.' read -r -a v1_parts <<<"$v1"
-  IFS='.' read -r -a v2_parts <<<"$v2"
-
-  for i in "${!v1_parts[@]}"; do
-    local part1=${v1_parts[i]:-0}
-    local part2=${v2_parts[i]:-0}
-
-    if [[ "$part1" < "$part2" ]]; then
-      return 1
-    elif [[ "$part1" > "$part2" ]]; then
-      return 0
-    fi
-  done
-  return 0
-}
-
-check_sys() {
-  if [[ $(id -u) != "0" ]]; then
-    echo_content red "必须以root用户身份运行此脚本"
-    exit 1
-  fi
-
-  if [[ $(command -v yum) ]]; then
-    package_manager='yum'
-  elif [[ $(command -v dnf) ]]; then
-    package_manager='dnf'
-  elif [[ $(command -v apt-get) ]]; then
-    package_manager='apt-get'
-  elif [[ $(command -v apt) ]]; then
-    package_manager='apt'
-  fi
-
-  if [[ -z "${package_manager}" ]]; then
-    echo_content red "当前系统不受支持"
-    exit 1
-  fi
-
-  if [[ -n $(find /etc -name "rocky-release") ]] || grep </proc/version -q -i "rocky"; then
-    release="rocky"
-    if rpm -q rocky-release &>/dev/null; then
-      version=$(rpm -q --queryformat '%{VERSION}' rocky-release)
-    fi
-  elif [[ -n $(find /etc -name "redhat-release") ]] || grep </proc/version -q -i "centos"; then
-    release="centos"
-    if rpm -q centos-stream-release &>/dev/null; then
-      version=$(rpm -q --queryformat '%{VERSION}' centos-stream-release)
-    elif rpm -q centos-release &>/dev/null; then
-      version=$(rpm -q --queryformat '%{VERSION}' centos-release)
-    fi
-  elif grep </etc/issue -q -i "debian" && [[ -f "/etc/issue" ]] || grep </etc/issue -q -i "debian" && [[ -f "/proc/version" ]]; then
-    release="debian"
-    version=$(cat /etc/debian_version)
-  elif grep </etc/issue -q -i "ubuntu" && [[ -f "/etc/issue" ]] || grep </etc/issue -q -i "ubuntu" && [[ -f "/proc/version" ]]; then
-    release="ubuntu"
-    version=$(lsb_release -sr)
-  fi
-
-  major_version=$(echo "${version}" | cut -d. -f1)
-
-  case $release in
-  rocky) ;;
-  centos)
-    if [[ $major_version -ge 6 ]]; then
-      echo_content green "检测到支持的CentOS版本: $version"
-    else
-      echo_content red "不支持的CentOS版本: $version. 仅支持CentOS 6+。"
-      exit 1
-    fi
-    ;;
-  ubuntu)
-    if [[ $major_version -ge 16 ]]; then
-      echo_content green "检测到支持的Ubuntu版本: $version"
-    else
-      echo_content red "不支持的Ubuntu版本: $version. 仅支持Ubuntu 16+。"
-      exit 1
-    fi
-    ;;
-  debian)
-    if [[ $major_version -ge 8 ]]; then
-      echo_content green "检测到支持的Debian版本: $version"
-    else
-      echo_content red "不支持的Debian版本: $version. 仅支持Debian 8+。"
-      exit 1
-    fi
-    ;;
-  *)
-    echo_content red "仅支持 CentOS 6+/Ubuntu 16+/Debian 8+"
-    exit 1
-    ;;
-  esac
-
-  if [[ $(arch) =~ ("x86_64"|"amd64") ]]; then
-    get_arch="amd64"
-  elif [[ $(arch) =~ ("aarch64"|"arm64") ]]; then
-    get_arch="arm64"
-  fi
-
-  if [[ -z "${get_arch}" ]]; then
-    echo_content red "仅支持 x86_64/amd64 arm64/aarch64 架构"
-    exit 1
+  else
+    echo_content red "数据库文件未创建: ${db_path}"
+    return 1
   fi
 }
 
-install_depend() {
-  if [[ "${package_manager}" == 'apt-get' || "${package_manager}" == 'apt' ]]; then
-    ${package_manager} update -y
-  fi
-  ${package_manager} install -y \
-    curl \
-    systemd \
-    nftables \
-    jq \
-    sqlite3
-}
-
-select_language() {
-  # 直接默认使用简体中文，不再提供选择
-  translation_file="zh_cn.json"
-  translation_file_content=$(curl -fsSL "${translation_file_base_url}${translation_file}")
-}
-
-get_translation() {
-  echo "${translation_file_content}" | jq -r "$1"
-}
-
-remove_forward() {
-  if command -v nft &>/dev/null && nft list tables | grep -q hui_porthopping; then
-    nft delete table inet hui_porthopping
-  fi
-  if command -v iptables &>/dev/null; then
-    for num in $(iptables -t nat -L PREROUTING -v --line-numbers | grep -i "hui_hysteria_porthopping" | awk '{print $1}' | sort -rn); do
-      iptables -t nat -D PREROUTING $num
-    done
-  fi
-  if command -v ip6tables &>/dev/null; then
-    for num in $(ip6tables -t nat -L PREROUTING -v --line-numbers | grep -i "hui_hysteria_porthopping" | awk '{print $1}' | sort -rn); do
-      ip6tables -t nat -D PREROUTING $num
-    done
-  fi
-}
-
-get_user_config() {
-  while [[ -z "${h_ui_port}" ]]; do
-    read -r -p "请输入H UI端口 (必须自定义): " h_ui_port
-    if [[ -z "${h_ui_port}" ]]; then
-      echo_content red "端口不能为空，请输入一个有效端口"
-    elif ! [[ "${h_ui_port}" =~ ^[0-9]+$ ]] || [[ "${h_ui_port}" -lt 1 ]] || [[ "${h_ui_port}" -gt 65535 ]]; then
-      echo_content red "请输入有效的端口号 (1-65535)"
-      h_ui_port=""
-    fi
-  done
-
-  read -r -p "请输入H UI时区 (默认: Asia/Shanghai): " h_ui_time_zone
-  [[ -z "${h_ui_time_zone}" ]] && h_ui_time_zone="Asia/Shanghai"
-
-  while [[ -z "${h_ui_username}" ]]; do
-    read -r -p "请输入管理员用户名: " h_ui_username
-    if [[ -z "${h_ui_username}" ]]; then
-      echo_content red "用户名不能为空"
-    fi
-  done
-
-  while [[ -z "${h_ui_password}" ]]; do
-    read -r -s -p "请输入管理员密码: " h_ui_password
-    echo
-    if [[ -z "${h_ui_password}" ]]; then
-      echo_content red "密码不能为空"
-    fi
-  done
-}
-
-# 新增：直接操作数据库的函数
+# 修改后的数据库更新函数
 update_database_credentials() {
-  local db_path="${HUI_DATA_SYSTEMD}h-ui.db"
+  local db_path="${HUI_DB_PATH}"
   local username="$1"
   local password="$2"
   
   # 等待数据库文件创建
-  local max_wait=30
-  local count=0
-  while [[ ! -f "${db_path}" && $count -lt $max_wait ]]; do
-    sleep 1
-    ((count++))
-  done
-  
-  if [[ ! -f "${db_path}" ]]; then
-    echo_content red "数据库文件未找到: ${db_path}"
+  if ! wait_for_database "${db_path}"; then
     return 1
   fi
   
   # 计算密码哈希
   local pass_hash=$(calculate_password_hash "${username}" "${password}")
-  local con_pass="${username}.${password}"  # 注意这里改为使用实际密码而不是用户名
+  local con_pass="${username}.${password}"
   local current_time=$(date '+%Y-%m-%d %H:%M:%S')
   local expire_time=253370736000000
   
   # 更新数据库中的管理员账户并锁定
-  sqlite3 "${db_path}" <<EOF
+  if sqlite3 "${db_path}" <<EOF
 BEGIN TRANSACTION;
 UPDATE account SET 
   username = '${username}',
@@ -279,8 +107,7 @@ UPDATE account SET
 WHERE id = 1;
 COMMIT;
 EOF
-  
-  if [[ $? -eq 0 ]]; then
+  then
     echo_content green "数据库凭据更新成功"
     return 0
   else
@@ -289,11 +116,11 @@ EOF
   fi
 }
 
+# 修改安装函数
 install_h_ui_systemd() {
   if systemctl status h-ui >/dev/null 2>&1; then
     echo_content skyBlue "---> H UI 已经安装，正在重新配置用户凭据"
     
-    # 即使已安装，也重新配置用户凭据
     get_user_config
     
     if update_database_credentials "${h_ui_username}" "${h_ui_password}"; then
@@ -320,12 +147,13 @@ install_h_ui_systemd() {
 
   get_user_config
 
+  # 这些服务可能不存在，忽略错误
   timedatectl set-timezone ${h_ui_time_zone} && timedatectl set-local-rtc 0
-  systemctl restart rsyslog
+  systemctl restart rsyslog 2>/dev/null || true
   if [[ "${release}" == "centos" || "${release}" == "rocky" ]]; then
-    systemctl restart crond
+    systemctl restart crond 2>/dev/null || true
   elif [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
-    systemctl restart cron
+    systemctl restart cron 2>/dev/null || true
   fi
 
   export GIN_MODE=release
@@ -343,28 +171,24 @@ install_h_ui_systemd() {
     systemctl enable h-ui &&
     systemctl start h-ui
 
-  # 等待服务启动并初始化数据库
-  echo_content yellow "等待H UI服务初始化..."
-  sleep 5
-
   # 检查服务状态
   if systemctl is-active --quiet h-ui; then
     echo_content green "H UI服务启动成功"
     
-    # 直接更新数据库中的用户凭据
-    echo_content yellow "正在更新管理员凭据..."
+    # 等待并更新数据库凭据
+    echo_content yellow "正在初始化数据库..."
     if update_database_credentials "${h_ui_username}" "${h_ui_password}"; then
       # 重启服务以应用更改
       systemctl restart h-ui
       sleep 3
       
       if systemctl is-active --quiet h-ui; then
-        echo_content green "凭据更新完成，服务重启成功"
+        echo_content green "安装完成，服务运行正常"
       else
         echo_content yellow "警告: 服务重启后状态异常，但安装已完成"
       fi
     else
-      echo_content yellow "警告: 凭据更新失败，请手动设置管理员账户"
+      echo_content yellow "警告: 凭据更新失败，请稍后使用选项5重置管理员账户"
     fi
   else
     echo_content red "H UI服务启动失败"
