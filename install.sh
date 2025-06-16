@@ -50,7 +50,7 @@ echo_content() {
   esac
 }
 
-# 新增：计算密码哈希的函数
+# 修复：计算密码哈希的函数 - 根据数据库中的实际格式进行调整
 calculate_password_hash() {
   local username="$1"
   local password="$2"
@@ -237,18 +237,20 @@ get_user_config() {
   done
 }
 
-# 新增：直接操作数据库的函数
-update_database_credentials() {
-  local db_path="${HUI_DATA_SYSTEMD}h-ui.db"
-  local username="$1"
-  local password="$2"
-  
-  # 等待数据库文件创建
-  local max_wait=30
+# 修复：增强的数据库操作函数
+wait_for_database() {
+  local db_path="$1"
+  local max_wait=60
   local count=0
+  
+  echo_content yellow "等待数据库文件创建..."
+  
   while [[ ! -f "${db_path}" && $count -lt $max_wait ]]; do
     sleep 1
     ((count++))
+    if [[ $((count % 10)) -eq 0 ]]; then
+      echo_content yellow "已等待 ${count} 秒..."
+    fi
   done
   
   if [[ ! -f "${db_path}" ]]; then
@@ -256,14 +258,52 @@ update_database_credentials() {
     return 1
   fi
   
+  # 等待数据库表创建完成
+  local table_count=0
+  count=0
+  while [[ $table_count -eq 0 && $count -lt $max_wait ]]; do
+    table_count=$(sqlite3 "${db_path}" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='account';" 2>/dev/null || echo "0")
+    if [[ $table_count -eq 0 ]]; then
+      sleep 1
+      ((count++))
+    fi
+  done
+  
+  if [[ $table_count -eq 0 ]]; then
+    echo_content red "数据库表未初始化完成"
+    return 1
+  fi
+  
+  echo_content green "数据库文件已就绪"
+  return 0
+}
+
+# 修复：更新数据库凭据的函数
+update_database_credentials() {
+  local db_path="${HUI_DATA_SYSTEMD}h-ui.db"
+  local username="$1"
+  local password="$2"
+  
+  # 等待数据库文件创建和初始化
+  if ! wait_for_database "${db_path}"; then
+    return 1
+  fi
+  
   # 计算密码哈希
   local pass_hash=$(calculate_password_hash "${username}" "${password}")
   local con_pass="${username}.${username}"
   local current_time=$(date '+%Y-%m-%d %H:%M:%S')
-  local expire_time=253370736000000
   
-  # 更新数据库中的管理员账户
-  sqlite3 "${db_path}" <<EOF
+  echo_content yellow "正在更新数据库凭据..."
+  echo_content yellow "用户名: ${username}"
+  echo_content yellow "密码哈希: ${pass_hash}"
+  
+  # 检查是否存在admin角色的账户
+  local admin_count=$(sqlite3 "${db_path}" "SELECT COUNT(*) FROM account WHERE role = 'admin';" 2>/dev/null || echo "0")
+  
+  if [[ $admin_count -gt 0 ]]; then
+    # 更新现有的管理员账户
+    sqlite3 "${db_path}" <<EOF
 UPDATE account SET 
   username = '${username}',
   pass = '${pass_hash}',
@@ -271,9 +311,23 @@ UPDATE account SET
   update_time = '${current_time}'
 WHERE role = 'admin';
 EOF
+  else
+    # 创建新的管理员账户
+    sqlite3 "${db_path}" <<EOF
+INSERT INTO account (username, pass, con_pass, quota, download, upload, expire_time, kick_util_time, device_no, role, deleted, create_time, update_time, login_at, con_at)
+VALUES ('${username}', '${pass_hash}', '${con_pass}', -1, 0, 0, 253370736000000, 0, 6, 'admin', 0, '${current_time}', '${current_time}', 0, 0);
+EOF
+  fi
   
-  if [[ $? -eq 0 ]]; then
+  local result=$?
+  
+  if [[ $result -eq 0 ]]; then
     echo_content green "数据库凭据更新成功"
+    
+    # 验证更新结果
+    local updated_username=$(sqlite3 "${db_path}" "SELECT username FROM account WHERE role = 'admin';" 2>/dev/null)
+    echo_content yellow "验证: 数据库中的用户名为 '${updated_username}'"
+    
     return 0
   else
     echo_content red "数据库凭据更新失败"
@@ -313,11 +367,26 @@ install_h_ui_systemd() {
   get_user_config
 
   timedatectl set-timezone ${h_ui_time_zone} && timedatectl set-local-rtc 0
-  systemctl restart rsyslog
+  
+  # 修复：增加对rsyslog和cron服务的检查
+  if systemctl list-unit-files | grep -q rsyslog; then
+    systemctl restart rsyslog
+  else
+    echo_content yellow "警告: rsyslog服务未找到"
+  fi
+  
   if [[ "${release}" == "centos" || "${release}" == "rocky" ]]; then
-    systemctl restart crond
+    if systemctl list-unit-files | grep -q crond; then
+      systemctl restart crond
+    else
+      echo_content yellow "警告: crond服务未找到"
+    fi
   elif [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
-    systemctl restart cron
+    if systemctl list-unit-files | grep -q cron; then
+      systemctl restart cron
+    else
+      echo_content yellow "警告: cron服务未找到"
+    fi
   fi
 
   export GIN_MODE=release
@@ -336,8 +405,8 @@ install_h_ui_systemd() {
     systemctl start h-ui
 
   # 等待服务启动并初始化数据库
-  echo_content yellow "等待H UI服务初始化..."
-  sleep 5
+  echo_content yellow "等待H UI服务启动和初始化..."
+  sleep 10
 
   # 检查服务状态
   if systemctl is-active --quiet h-ui; then
@@ -347,13 +416,15 @@ install_h_ui_systemd() {
     echo_content yellow "正在更新管理员凭据..."
     if update_database_credentials "${h_ui_username}" "${h_ui_password}"; then
       # 重启服务以应用更改
+      echo_content yellow "重启服务以应用更改..."
       systemctl restart h-ui
-      sleep 3
+      sleep 5
       
       if systemctl is-active --quiet h-ui; then
         echo_content green "凭据更新完成，服务重启成功"
       else
         echo_content yellow "警告: 服务重启后状态异常，但安装已完成"
+        systemctl status h-ui
       fi
     else
       echo_content yellow "警告: 凭据更新失败，请手动设置管理员账户"
